@@ -59,7 +59,7 @@ import { useForcedTextDirection } from '@/store/text-direction'
 import { ArtifactCard } from './artifact-card'
 import { SessionRefLink } from './directive-text'
 import { detectEmbed, extractAlert, MarkdownAlert, RichCodeBlock, UrlEmbed } from './embeds'
-import { ResizableMarkdownTable, ResizableMarkdownTh } from './markdown-table'
+import { MarkdownTd, ResizableMarkdownTable, ResizableMarkdownTh } from './markdown-table'
 import { ToolMediaSlot } from './tool-media-slot'
 import { paragraphPlainText, TranscriptDirectiveLeaf, useResolvedParagraph } from './transcript-directive'
 
@@ -732,16 +732,8 @@ function MarkdownTextSurface({
           <thead className={cn('m-0 bg-muted/35 text-muted-foreground', className)} {...props} />
         ),
         th: ResizableMarkdownTh,
-        td: ({ children, className, ...props }: ComponentProps<'td'>) => (
-          <td
-            className={cn(
-              'px-2.5 py-1.5 align-top text-[length:var(--conversation-text-font-size)] leading-snug',
-              className
-            )}
-            {...props}
-          >
-            {decorateText ? decorateText(children) : children}
-          </td>
+        td: ({ children, ...props }: ComponentProps<'td'>) => (
+          <MarkdownTd {...props}>{decorateText ? decorateText(children) : children}</MarkdownTd>
         ),
         img: previewOnly ? ({ alt }: ComponentProps<'img'>) => <span>{alt}</span> : MarkdownImage,
         // ```mermaid / ```svg fences route to their lazy renderers; substantial

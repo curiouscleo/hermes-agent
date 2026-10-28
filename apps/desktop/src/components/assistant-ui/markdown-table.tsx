@@ -43,7 +43,9 @@ import { cn } from '@/lib/utils'
  */
 
 /** A column can't be dragged narrower than this — below it the header label
- *  has no room and the seam becomes hard to grab back. */
+ *  has no room and the seam becomes hard to grab back. It is also the floor
+ *  under a stored width, so a table resized in a wide window keeps every column
+ *  usable in a narrow one (the table scrolls sideways instead). */
 const MIN_COLUMN_PX = 48
 
 const equalWidths = (left: null | number[], right: null | number[]) =>
@@ -92,7 +94,10 @@ export function ResizableMarkdownTable({ children, className, ...props }: Compon
 
     const cells = Array.from(table.tHead?.rows[0]?.cells ?? [])
     const index = cells.indexOf(handle.closest('th') as HTMLTableCellElement)
-    const tableWidth = table.getBoundingClientRect().width
+    // Rendered cqi widths refer to the scroll wrapper, even when the 48px
+    // floors make the table wider than it. Use the same reference for a drag
+    // or its first move would shrink the overflowing table and jump the seam.
+    const tableWidth = table.parentElement!.clientWidth
 
     // The last column has no seam of its own, and a zero-width table (one in a
     // collapsed pane) gives no denominator to work in.
@@ -154,11 +159,22 @@ export function ResizableMarkdownTable({ children, className, ...props }: Compon
   }, [])
 
   return (
-    <div className="aui-md-table my-2 max-w-full overflow-x-auto rounded-[0.375rem] border border-(--ui-stroke-tertiary)">
+    <div className="aui-md-table @container my-2 max-w-full overflow-x-auto rounded-[0.375rem] border border-(--ui-stroke-tertiary)">
       <table
         className={cn(
           'm-0 w-full min-w-[18rem] border-collapse text-[length:var(--conversation-text-font-size)] [&_tr]:border-b [&_tr]:border-(--ui-stroke-tertiary) last:[&_tr]:border-0',
-          widths && 'table-fixed [&_td]:wrap-anywhere',
+          // Auto layout ignores a width on the cell itself, so the label column
+          // is sized through its cell's span: block and max-content, the label's
+          // natural width becomes the column's minimum, capped at 30% of the
+          // wrapper, and longer labels wrap between words. `min-w-full` lets the
+          // span fill a column that auto layout made wider (a long first
+          // column beside short ones), so its text uses that room instead of
+          // stopping at the cap. Off in fixed layout, where the width is the
+          // user's and a max-content span would overflow it. Table classes, not
+          // cell state: a drag still touches no cell.
+          widths
+            ? 'table-fixed [&_td]:wrap-anywhere'
+            : '[&_td:first-child>[data-md-cell]]:block [&_td:first-child>[data-md-cell]]:w-max [&_td:first-child>[data-md-cell]]:max-w-[30cqi] [&_td:first-child>[data-md-cell]]:min-w-full',
           className
         )}
         onDoubleClick={onDoubleClick}
@@ -168,14 +184,37 @@ export function ResizableMarkdownTable({ children, className, ...props }: Compon
       >
         {widths && (
           <colgroup>
+            {/* cqi of the wrapper is the table's % while the table fills it;
+                Chromium treats a max()/clamp() mixing % and px on a column as
+                auto, so the floor needs a plain length. */}
             {widths.map((width, index) => (
-              <col key={index} style={{ width: `${width}%` }} />
+              <col key={index} style={{ width: `max(${width}cqi, ${MIN_COLUMN_PX}px)` }} />
             ))}
           </colgroup>
         )}
         {children}
       </table>
     </div>
+  )
+}
+
+export function MarkdownTd({ children, className, ...props }: ComponentProps<'td'>) {
+  return (
+    <td
+      className={cn(
+        'px-2.5 py-1.5 align-top text-[length:var(--conversation-text-font-size)] leading-snug',
+        // Words stay whole, against the `wrap-anywhere` inherited from the
+        // message root that starves short columns down to a letter. Links still
+        // break anywhere, so a URL wraps instead of widening the table; the
+        // `[&_a]` is needed because `prose-a:break-words` wins on links.
+        'wrap-break-word [&_a]:wrap-anywhere',
+        className
+      )}
+      {...props}
+    >
+      {/* The span is what the table sizes in the label column. */}
+      <span data-md-cell>{children}</span>
+    </td>
   )
 }
 
