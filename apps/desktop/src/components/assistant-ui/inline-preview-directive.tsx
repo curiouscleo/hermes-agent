@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
+import type { HermesReadFileErrorResult, HermesReadFileTextResult } from '@/global'
 import { useThemeEpoch } from '@/hooks/use-theme-epoch'
 import { isReadFileErrorResult, readDesktopFileText } from '@/lib/desktop-fs'
 import { localPreviewTarget } from '@/lib/local-preview'
@@ -20,14 +21,15 @@ import { localPreviewTarget } from '@/lib/local-preview'
  * SIZE IS CONTENT-DRIVEN. The opaque origin means the parent can't measure
  * the document, but we own the srcdoc string — an injected script posts the
  * content's size up via postMessage (tagged with a per-mount token). Height
- * tracks live within the clamp band. Width is decided ONCE from the first
- * report by comparing the content's intrinsic span to the frame's own
- * viewport: content that spans its viewport is FLUID and renders at 100% of
- * the transcript column (CSS then tracks a resize, so no measurement
- * feedback loop), while a narrower fixed-size widget shrink-wraps to its
- * intrinsic width and sits left in the message flow like an image. A
- * `height="480"` attribute only sets the starting height — measurement
- * always wins.
+ * is the content box, not the frame, so a small widget gets a small frame;
+ * it tracks live up to MAX_HEIGHT. Width is decided from the first report by
+ * comparing the content's intrinsic span to the frame's own viewport:
+ * content that spans its viewport (or is wider) is FLUID and renders at 100%
+ * of the transcript column, so CSS tracks a resize. A narrower fixed-size
+ * widget shrink-wraps to its intrinsic width and sits left in the message
+ * flow like an image. A fixed width may grow on a later, wider report but
+ * never shrinks. A `height="480"` attribute only sets the starting height —
+ * measurement always wins.
  *
  * NATIVE BY DEFAULT. A theme prelude injects first: the app's resolved
  * theme tokens under friendly names (--foreground, --muted-foreground,
@@ -46,8 +48,9 @@ import { localPreviewTarget } from '@/lib/local-preview'
  * undeliverable intent resolves `{ ok: false, error }` instead of being
  * truncated or dropped behind the widget's back (#118973).
  *
- * Non-HTML targets and remote gateways (no local file access) fall back to
- * the standard preview-attachment card rather than a broken frame.
+ * Non-HTML targets and files that can't be read whole (missing, binary,
+ * empty, or truncated by the read cap) fall back to the standard
+ * preview-attachment card rather than a broken frame.
  */
 
 const MIN_HEIGHT = 120
@@ -263,24 +266,31 @@ export function themePrelude(vars: Record<string, string>, font: string, colorSc
 
 /** The script injected into the srcdoc that reports content size to the
  *  parent. Runs inside the opaque origin, so postMessage is its only door —
- *  it can say "I am N pixels" and nothing else. Height is the document
- *  scrollHeight; width is the union of the body children's boxes (intrinsic
- *  content width — the document itself always fills the viewport, so
- *  scrollWidth would just echo the frame back); viewport is the frame's own
- *  content width, so the parent can tell a fluid page (intrinsic ≈ viewport)
- *  from a fixed widget (intrinsic < viewport). */
+ *  it can say "I am N pixels" and nothing else. Height is the root element's
+ *  box, rounded up, plus the horizontal scrollbar when the content overflows
+ *  sideways. scrollHeight only contributes when it exceeds the viewport (a
+ *  height:100% root can contain taller overflowing children); otherwise it
+ *  would keep a small widget at the frame's own height. Width is the union of the body
+ *  children's boxes (intrinsic content width — the document itself always
+ *  fills the viewport, so scrollWidth would just echo the frame back);
+ *  viewport is the frame's own content width, so the parent can tell a fluid
+ *  page (intrinsic ≈ viewport) from a fixed widget (intrinsic < viewport).
+ *  It re-posts when any of the three moves by more than 1 px. */
 export function measurementScript(token: string): string {
   return (
     '<script>(function(){var t=' +
     JSON.stringify(token) +
-    ';var lastH=0,lastW=0;function post(){var d=document.documentElement;var b=document.body;' +
-    'var h=Math.max(d?d.scrollHeight:0,b?b.scrollHeight:0);' +
+    ';var lastH=0,lastW=0,lastV=0;function post(){var d=document.documentElement;var b=document.body;' +
+    'var h=d?Math.ceil(Math.max(d.getBoundingClientRect().height,' +
+    'd.scrollHeight>d.clientHeight?d.scrollHeight:0))+' +
+    '(d.scrollWidth>d.clientWidth?Math.max(0,innerHeight-d.clientHeight):0):0;' +
     'var w=0;if(b){var kids=b.children;var L=Infinity,R=0;for(var i=0;i<kids.length;i++){' +
     'var r=kids[i].getBoundingClientRect();if(r.width===0&&r.height===0)continue;' +
     'if(r.left<L)L=r.left;if(r.right>R)R=r.right}' +
     'if(R>L)w=R-L}' +
     'w=Math.ceil(w);var vp=d?d.clientWidth:0;' +
-    'if(Math.abs(h-lastH)>1||Math.abs(w-lastW)>1){lastH=h;lastW=w;parent.postMessage({type:' +
+    'if(Math.abs(h-lastH)>1||Math.abs(w-lastW)>1||Math.abs(vp-lastV)>1){lastH=h;lastW=w;lastV=vp;' +
+    'parent.postMessage({type:' +
     JSON.stringify(SIZE_MESSAGE_TYPE) +
     ',token:t,height:h,width:w,viewport:vp},"*")}}' +
     'if(typeof ResizeObserver==="function"){var ro=new ResizeObserver(post);' +
@@ -311,8 +321,9 @@ export interface FrameSizeReport {
 /** Parse a size report from the frame. Null unless it is OUR message type,
  *  carries OUR token, and holds a sane finite height — anything inside the
  *  sandbox can postMessage, so everything is validated before it moves the
- *  layout. Height clamped to the band; width and viewport sanitized but
- *  uncapped (the frame caps width against the column at render). */
+ *  layout. Height is rounded and clamped to [1, MAX_HEIGHT], so a small
+ *  widget keeps its small height; width and viewport sanitized but uncapped
+ *  (the frame caps width against the column at render). */
 export function frameSizeFromMessage(data: unknown, token: string): FrameSizeReport | null {
   if (typeof data !== 'object' || data === null) {
     return null
@@ -332,7 +343,7 @@ export function frameSizeFromMessage(data: unknown, token: string): FrameSizeRep
     typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0
 
   return {
-    height: Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, Math.round(message.height))),
+    height: Math.min(MAX_HEIGHT, Math.max(1, Math.round(message.height))),
     viewport: positiveInt(message.viewport),
     width: positiveInt(message.width)
   }
@@ -352,6 +363,40 @@ export function frameWidthPlan(intrinsic: number, viewport: number): number | 'f
   }
 
   return intrinsic >= viewport - RESIZE_TOLERANCE ? 'fill' : intrinsic
+}
+
+/** The frame's width after a size report. The first measurable report decides
+ *  fill vs fixed. A fill frame stays fill: CSS follows the column, and wider
+ *  content scrolls sideways inside. A fixed width may grow on a wider report
+ *  but never shrinks, so %-width children can't spiral it toward zero. A
+ *  report with no measurable width changes nothing. */
+export function nextFrameWidth(prev: number | 'fill' | null, report: FrameSizeReport): number | 'fill' | null {
+  if (report.width <= 0) {
+    return prev
+  }
+
+  if (prev === null) {
+    return frameWidthPlan(report.width, report.viewport)
+  }
+
+  if (prev === 'fill') {
+    return 'fill'
+  }
+
+  return Math.max(prev, report.width)
+}
+
+/** The srcdoc text from a file read, or null when the file can't be framed
+ *  whole: a failed read, binary, empty, or truncated (the read stops at its
+ *  size cap, so the page would render cut off with its scripts never run). */
+export function frameDocFromRead(
+  result: HermesReadFileTextResult | HermesReadFileErrorResult | null | undefined
+): string | null {
+  if (!result || isReadFileErrorResult(result) || result.binary || result.truncated || !result.text) {
+    return null
+  }
+
+  return result.text
 }
 
 const HTML_FILE_RE = /\.(?:html?|xhtml)$/i
@@ -425,16 +470,12 @@ function InlineHtmlFrame({
           return
         }
 
-        if (!result || isReadFileErrorResult(result)) {
-          setFailed(true)
+        const text = frameDocFromRead(result)
 
-          return
-        }
-
-        if (result.binary || !result.text) {
+        if (text === null) {
           setFailed(true)
         } else {
-          setDoc(result.text)
+          setDoc(text)
         }
       })
       .catch(() => alive && setFailed(true))
@@ -495,15 +536,12 @@ function InlineHtmlFrame({
         Math.abs(next.height - (prev ?? initialHeight ?? DEFAULT_HEIGHT)) > RESIZE_TOLERANCE ? next.height : prev
       )
 
-      // Width is decided ONCE, from the first report — the content's
-      // intrinsic span against the frame's own viewport. Tracking width live
-      // would feedback-loop: %-width children reflow narrower every time the
-      // frame shrinks, spiraling toward zero. A fluid page renders at 100%
-      // and CSS tracks the column from there; only a fixed widget latches a
-      // pixel width.
-      if (next.width > 0) {
-        setWidthPlan(prev => prev ?? frameWidthPlan(next.width, next.viewport))
-      }
+      // Fill vs fixed is decided from the first report — the content's
+      // intrinsic span against the frame's own viewport. A fluid page renders
+      // at 100% and CSS tracks the column from there. A fixed width may grow
+      // later but never shrinks: tracking it both ways would feedback-loop,
+      // as %-width children reflow narrower every time the frame shrinks.
+      setWidthPlan(prev => nextFrameWidth(prev, next))
     }
 
     window.addEventListener('message', onMessage)
@@ -542,10 +580,7 @@ function InlineHtmlFrame({
           style={{ height }}
         />
       ) : (
-        <span
-          className="relative block max-w-full transition-[height] duration-200"
-          style={{ height, width }}
-        >
+        <span className="relative block max-w-full transition-[height] duration-200" style={{ height, width }}>
           <iframe
             className="absolute inset-0 size-full border-0 bg-transparent"
             loading="lazy"

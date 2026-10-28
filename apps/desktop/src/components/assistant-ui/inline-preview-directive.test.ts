@@ -126,7 +126,7 @@ describe('frameSizeFromMessage', () => {
 
   it('accepts our message with our token, height clamped', () => {
     expect(frameSizeFromMessage(msg(), 'tok')).toEqual({ height: 500, viewport: 640, width: 300 })
-    expect(frameSizeFromMessage(msg({ height: 12 }), 'tok')?.height).toBe(120)
+    expect(frameSizeFromMessage(msg({ height: 12 }), 'tok')?.height).toBe(12)
     expect(frameSizeFromMessage(msg({ height: 5000 }), 'tok')?.height).toBe(1200)
     expect(frameSizeFromMessage(msg({ height: 500.7 }), 'tok')?.height).toBe(501)
   })
@@ -302,18 +302,25 @@ describe('measurementScript', () => {
         children: [{ getBoundingClientRect: () => ({ height: 100, left: 0, right: 300, width: 300 }) }],
         scrollHeight: 400
       },
-      documentElement: { clientWidth: 900, scrollHeight: 400 }
+      documentElement: {
+        clientHeight: 400,
+        clientWidth: 900,
+        getBoundingClientRect: () => ({ height: 400 }),
+        scrollHeight: 400,
+        scrollWidth: 900
+      }
     }
 
     const body = measurementScript('tok')
       .replace(/^<script>/, '')
       .replace(/<\/script>$/, '')
 
-    new Function('document', 'parent', 'addEventListener', 'ResizeObserver', body)(
+    new Function('document', 'parent', 'addEventListener', 'ResizeObserver', 'innerHeight', body)(
       fakeDocument,
       parent,
       () => {},
-      undefined
+      undefined,
+      400
     )
 
     return posted
